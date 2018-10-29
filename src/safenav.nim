@@ -102,6 +102,82 @@ macro `??`*[T: Nilable](a: T, b: untyped): untyped =
     if isNil(`a`): `b`
     else: `a`
 
+proc buildIfLet(i: int; names, expressions: seq[NimNode]; body: NimNode): NimNode =
+  if i >= len names: return body
+  let
+    more = buildIfLet(i + 1, names, expressions, body)
+    name = names[i]
+    expression = expressions[i]
+  return quote do:
+    block:
+      let `name` = `expression`
+      when `name` is Option:
+        if (let `name` = `expression`; isSome(`name`)):
+          block:
+            let `name` = unsafeGet(`name`)
+            `more`
+      elif `name` is Nilable:
+        if (let `name` = `expression`; not isNil(`name`)):
+          `more`
+      else:
+        `more`
+
+macro ifLet*(bindings: untyped; body: varargs[untyped]): untyped =
+  ## A macro mimicing Lisp's `if-let*`
+
+  #echo treerepr bindings
+  #echo treerepr body
+
+  var bdy: NimNode
+  var fail = quote do:
+    discard
+
+  case len body
+  of 1:
+    bdy = body[0]
+  of 2:
+    bdy = body[0]
+    body[1].expectKind nnkElse
+    fail = body[1][0]
+  else:
+    error("Invalid body. Expected expected a block optionally followed by an `else:` block", body)
+
+  var names, expressions: seq[NimNode] = @[]
+
+  case bindings.kind
+  of nnkInfix:
+    if not eqIdent(bindings[0], ":="):
+      error("Expected an assignment using operator `:=`", bindings[0])
+    let name = bindings[1]
+    name.expectKind nnkIdent
+    names &= name
+    expressions &= bindings[2]
+  of nnkIdent:
+    names &= bindings
+    expressions &= bindings
+  of nnkStmtList:
+    for n in bindings:
+      n.expectKind nnkAsgn
+      n[0].expectKind nnkIdent
+      names &= n[0]
+      expressions &= n[1]
+  else:
+    error("Invalid binding. Expected an identifier or " &
+          "an assignment expression of the form `identifier := expression` or " &
+          "a stmt list of assigments of the form `identifier = expression`", bindings)
+
+  let succeeded = gensym(nskVar, "succeeded")
+  bdy = quote do:
+    `succeeded` = true
+    `bdy`
+
+  let built = buildIfLet(0, names, expressions, bdy)
+  result = quote do:
+    var `succeeded`: bool
+    `built`
+    if not `succeeded`:
+      `fail`
+
 when isMainModule:
   type
     Cons = ref object
